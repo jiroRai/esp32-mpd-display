@@ -1,45 +1,96 @@
-# ESP32-C3 与 ST7735S 显示屏项目
+# esp32-mpd-display
 
-此项目旨在使用ESP32-C3开发板和bodmer/TFT_eSPI库驱动ST7735S显示屏。
+一个运行在 ESP32 上的 MPD（Music Player Daemon）远程显示客户端，使用 0.96 寸 ST7735S IPS 屏幕（80×160，横向）实时展示当前播放信息。
 
-## 配置信息
+![display layout](docs/layout.png)
 
-- **开发板**: ESP32-C3 (合宙开发板)
-- **显示屏**: ST7735S 0.96寸 80x160分辨率
-- **库**: bodmer/TFT_eSPI
+---
 
-### 引脚连接
+## 功能
 
-由于ST7735S屏幕上的标识可能与实际功能不同，请注意：
+- 实时显示曲名、艺术家、专辑、播放进度、音量
+- 播放模式标志：repeat / random / single / consume / crossfade
+- 曲名 / 艺术家 / 专辑超长时自动跑马灯，**速度自适应文本长度**，长短文本来回周期一致
+- 艺术家与专辑每 7 秒交替翻页
+- 播放进度在本地补帧，不依赖 MPD 轮询频率，秒针平滑
+- 非阻塞 MPD 状态机，TCP 通信不阻塞 LVGL 渲染
+- MPD 保持长连接，避免每秒重连
 
-| 屏幕标识 | 实际功能 | ESP32-C3引脚 |
-|----------|----------|---------------|
-| VCC      | 电源正极 | 3.3V          |
-| GND      | 电源负极 | GND           |
-| SCL      | SPI时钟  | GPIO6         |
-| SDA      | SPI数据  | GPIO7         |
-| CS       | 片选     | GPIO10        |
-| DC       | 数据/命令| GPIO2         |
-| RST      | 复位     | GPIO3         |
+---
 
-## 构建环境
+## 硬件
 
-### 主环境
-- `esp32-c3-devkitm-1` - 使用TFT_eSPI库的主要环境
+| 组件 | 规格 |
+|------|------|
+| 主控 | ESP32（任意带 WiFi 的型号） |
+| 屏幕 | 0.96" ST7735S，80×160，IPS，SPI 接口 |
+| 使用方向 | 横向（rotation = 3） |
 
-### 辅助环境
-- `simple-st7735-test` - 使用较低SPI频率的简化测试环境
-- `esp32-c3-i2c-test` - I2C设备扫描测试
+引脚在 `include/User_Setup.h` 中配置（TFT_eSPI 标准配置方式）。
 
-## 使用方法
+---
 
-要上传主程序到ESP32-C3：
+## 依赖
+
+| 库 | 说明 |
+|----|------|
+| [TFT_eSPI](https://github.com/Bodmer/TFT_eSPI) | 硬件 SPI 驱动，`pushImage()` 批量传输，比 Adafruit 快 10x+ |
+| [LVGL](https://lvgl.io/) | UI 框架，版本 8.x |
+| Arduino WiFi / WiFiClient | ESP32 Arduino core 内置 |
+
+字体使用 [Fusion Pixel](https://github.com/TakWolf/fusion-pixel-font)（12px、10px），以 LVGL 的 `LV_FONT_DECLARE` 方式引入。
+
+---
+
+## 配置
+
+编辑 `src/main.cpp` 顶部的常量：
+
+```cpp
+static const char* WIFI_SSID     = "YOUR_WIFI_SSID";
+static const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+static const char* MPD_HOST      = "192.168.x.x";   // MPD 服务器局域网 IP
+static const int   MPD_PORT      = 6600;
 ```
-pio run -e esp32-c3-devkitm-1 --target upload
+
+其余可调参数：
+
+```cpp
+static const unsigned long MPD_INTERVAL_MS  = 1000;  // MPD 轮询间隔（ms）
+static const unsigned long FLIP_INTERVAL_MS = 7000;  // 艺术家/专辑翻页间隔（ms）
 ```
 
-## 故障排除
+跑马灯单程时长在 `setup_ui()` 里通过 `scroll_label_register(label, period_ms)` 设置，默认 3000ms。
 
-如果显示屏出现问题，请参阅以下文档：
-- `troubleshooting_detailed.md` - 详细的故障排除指南
-- `serial_monitor_guide.md` - 如何查看串口输出
+---
+
+## 屏幕布局
+
+```
+Y= 0  ┌─────────────────────────────┐
+      │ ▶ 播放状态       [rz--] V:80% │  ← fusion_pixel_10
+Y=14  ├─────────────────────────────┤
+Y=18  │ 歌曲名（自适应速度跑马灯）    │  ← fusion_pixel_12
+Y=34  │ by 艺术家 / from 专辑（翻页）│  ← 每 7s 切换
+Y=55  │ 00:00               03:45   │  ← 已播 / 总时长
+Y=68  │ ████████░░░░░░░░░░░░░░░░░░  │  ← 进度条
+Y=80  └─────────────────────────────┘
+```
+
+状态图标颜色：播放 = 电子深青，暂停 = 铓锣灰，停止 = 暗红。
+
+---
+
+## 性能优化说明
+
+- MPD 响应用静态 `char` 数组接收，避免 `String` 堆碎片
+- UI 脏检查：内容未变时跳过 `lv_label_set_text`，减少 LVGL 重绘
+- 时间标签和进度条只在整秒跳变时更新
+- LVGL 缓冲区全屏（160×80），减少 flush 次数
+- 跑马灯速度在文本变化后延迟 4 帧读取 `scroll_right`，等待 LVGL layout 稳定后再计算，避免取到旧值
+
+---
+
+## License
+
+MIT
