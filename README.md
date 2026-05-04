@@ -2,7 +2,7 @@
 
 一个运行在 ESP32 上的 MPD（Music Player Daemon）远程显示客户端，使用 0.96 寸 ST7735S IPS 屏幕（80×160，横向）实时展示当前播放信息。
 
-![display layout](docs/layout.png)
+![display layout](docs/preview.webp)
 
 ---
 
