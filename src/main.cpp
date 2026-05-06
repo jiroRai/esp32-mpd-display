@@ -67,7 +67,7 @@ static void initDisplay() {
     tft.init(INITR_GREENTAB160x80);
     delay(200);
     tft.setSwapBytes(true);
-    tft.setRotation(3);
+    tft.setRotation(1);
     tft.fillScreen(TFT_BLACK);
 }
 
