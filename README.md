@@ -1,6 +1,6 @@
 # esp32-mpd-display
 
-一个运行在 ESP32-C3 上的 MPD（Music Player Daemon）远程显示客户端，使用 0.96 寸 ST7735S IPS 屏幕（80×160，横向）实时展示当前播放信息。
+一个运行在 ESP32-C3 上的 MPD（Music Player Daemon）远程显示客户端，使用 0.96 寸 ST7735S IPS 屏幕（80×160，横向）实时展示当前播放信息，并支持按键控制。
 
 ![display layout](docs/preview.jpg)
 
@@ -11,10 +11,11 @@
 - 实时显示曲名、艺术家、专辑、播放进度、音量
 - 播放模式标志：repeat / random / single / consume / crossfade
 - 曲名 / 艺术家 / 专辑超长时自动跑马灯，**速度自适应文本长度**，长短文本来回周期一致
-- 艺术家与专辑每 7 秒交替翻页
+- 艺术家与专辑每 7 秒交替翻页（带平滑滚动动画）
 - 播放进度在本地补帧，不依赖 MPD 轮询频率，秒针平滑
 - 非阻塞 MPD 状态机，TCP 通信不阻塞 LVGL 渲染
 - MPD 保持长连接，避免每秒重连
+- **按键控制**：GPIO9 按钮，短按切下一首，长按切换播放/暂停
 
 ---
 
@@ -24,7 +25,8 @@
 |------|------|
 | 主控 | ESP32-C3（RISC-V，160MHz，320KB RAM） |
 | 屏幕 | 0.96" ST7735S，80×160，IPS，SPI 接口 |
-| 使用方向 | 横向（rotation = 3） |
+| 使用方向 | 横向（rotation = 1） |
+| 按键 | GPIO9（内部上拉，另一侧接 GND） |
 
 ### 引脚连接
 
@@ -81,7 +83,7 @@ pio run -t upload
 | [LVGL](https://lvgl.io/) | UI 框架，版本 8.x |
 | Arduino WiFi / WiFiClient | ESP32 Arduino core 内置 |
 
-字体使用 [Fusion Pixel](https://github.com/TakWolf/fusion-pixel-font)（12px、10px、8px），以 LVGL 的 `LV_FONT_DECLARE` 方式引入。
+字体使用 [Fusion Pixel](https://github.com/TakWolf/fusion-pixel-font)（12px、10px），以 LVGL 的 `LV_FONT_DECLARE` 方式引入。
 
 ---
 
@@ -92,6 +94,14 @@ pio run -t upload
 ```cpp
 static const unsigned long MPD_INTERVAL_MS  = 1000;  // MPD 轮询间隔（ms）
 static const unsigned long FLIP_INTERVAL_MS = 7000;  // 艺术家/专辑翻页间隔（ms）
+```
+
+按键参数：
+
+```cpp
+static const uint32_t BTN_DEBOUNCE_MS  = 50;    // 消抖时间
+static const uint32_t BTN_COOLDOWN_MS  = 500;   // 防止连发的冷却时间
+static const uint32_t BTN_LONGPRESS_MS = 500;   // 长按判定时间
 ```
 
 跑马灯单程时长在 `setup_ui()` 里通过 `scroll_label_register(label, period_ms)` 设置，默认 3000ms。
@@ -105,13 +115,32 @@ Y= 0  ┌───────────────────────�
       │ ▶ 播放状态       [rz--] V:80% │  ← fusion_pixel_10
 Y=14  ├─────────────────────────────┤
 Y=18  │ 歌曲名（自适应速度跑马灯）    │  ← fusion_pixel_12
-Y=34  │ by 艺术家 / from 专辑（翻页）│  ← 每 7s 切换
+Y=34  │ by 艺术家 / from 专辑（翻页）│  ← 每 7s 切换，带平滑滚动动画
 Y=55  │ 00:00               03:45   │  ← 已播 / 总时长
 Y=68  │ ████████░░░░░░░░░░░░░░░░░░  │  ← 进度条
 Y=80  └─────────────────────────────┘
 ```
 
-状态图标颜色：播放 = 电子深青，暂停 = 铓锣灰，停止 = 暗红。
+状态图标颜色：
+| 状态 | 图标 | 颜色 |
+|------|------|------|
+| 播放 | `` | 电子深青 `#00CED1` |
+| 暂停 | `⏸` | 铓锣灰 `#708090` |
+| 停止 | `☹` | 暗红 `#A52A2A` |
+| 未联网 | `✈` | 航太蓝 `#4A90E2` |
+| 联网成功 | `OK` | 琥珀黄 `#FFB000` |
+| 联网失败 | `✈` | 暗红 `#A52A2A` |
+
+---
+
+## 按键控制
+
+| 操作 | 功能 |
+|------|------|
+| 短按（< 500ms） | 切下一首 |
+| 长按（≥ 500ms） | 切换播放/暂停 |
+
+按键使用 GPIO9，内部上拉，另一侧接 GND。上电后前 1 秒屏蔽，等待电平稳定。
 
 ---
 
@@ -139,6 +168,8 @@ TFT_eSPI 库在 ESP32-C3 上存在两个已知 bug，本项目通过 `patches/ap
 - 时间标签和进度条只在整秒跳变时更新
 - LVGL 缓冲区全屏（160×80），减少 flush 次数
 - 跑马灯速度在文本变化后延迟 4 帧读取 `scroll_right`，等待 LVGL layout 稳定后再计算，避免取到旧值
+- 进度本地补帧：两次 MPD 轮询之间，通过 `millis()` 差值本地插值 `elapsed`，秒针平滑不跳变
+- 非阻塞 MPD 状态机：将 TCP 通信拆分为 `SEND_STATUS → READ_STATUS → SEND_CURRENTSONG → READ_CURRENTSONG → PARSE` 多步，每次 `loop()` 只推进一小步，不阻塞 LVGL 渲染
 
 ---
 
