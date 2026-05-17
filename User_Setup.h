@@ -23,8 +23,8 @@
 #define TFT_MOSI 3
 #define TFT_SCLK 2
 
-// SPI 频率（10MHz，兼容性更好，部分 ST7735S 克隆屏在 27MHz 下黑屏）
-#define SPI_FREQUENCY  10000000
+// SPI 频率（40MHz）
+#define SPI_FREQUENCY  40000000
 
 // 不使用 USE_HSPI_PORT 或 USE_FSPI_PORT
 // ESP32-C3 上 HSPI = FSPI = SPI2_HOST，只有一个 SPI 控制器

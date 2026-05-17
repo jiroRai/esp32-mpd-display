@@ -21,6 +21,7 @@
 #include <WiFi.h>
 #include <TFT_eSPI.h>
 #include <lvgl.h>
+#include <driver/gpio.h>
 
 // ============================================================
 //  网络与 MPD 配置
@@ -33,6 +34,13 @@ static const unsigned long WIFI_TIMEOUT_MS  = 15000;
 static const unsigned long MPD_TIMEOUT_MS   = 300;
 static const unsigned long MPD_INTERVAL_MS  = 1000;
 static const unsigned long FLIP_INTERVAL_MS = 7000;
+
+// ============================================================
+//  按键配置（IO09，另一侧接 GND，内部上拉）
+// ============================================================
+static const uint8_t  BTN_PIN         = 9;
+static const uint32_t BTN_DEBOUNCE_MS = 50;   // 消抖时间
+static const uint32_t BTN_COOLDOWN_MS = 500;  // 防止连发的冷却时间
 
 WiFiClient client;
 
@@ -491,6 +499,28 @@ static void parseSongResponse(const char* resp) {
     }
 }
 
+// 发送 MPD next 命令，立即跳下一首
+static void sendMpdNext() {
+    if (!mpdConnected) return;
+
+    // 清空残留，发送命令
+    while (client.available()) client.read();
+    client.print("next\n");
+
+    // 等待 OK\n，最多 300ms
+    uint32_t t = millis();
+    while (millis() - t < 300) {
+        if (client.available()) {
+            String line = client.readStringUntil('\n');
+            if (line.startsWith("OK") || line.startsWith("ACK")) break;
+        }
+    }
+
+    // 重置缓冲区，强制立刻触发一次完整轮询
+    mpd_buf_len = 0;
+    mpdState    = MPD_SEND_STATUS;
+}
+
 // 非阻塞 MPD 状态机：每次 loop() 调用一次，推进一小步
 static void mpdStateMachine() {
     if (!mpdConnected) {
@@ -596,6 +626,9 @@ static void update_ui_values() {
 // ============================================================
 void setup() {
     Serial.begin(115200);
+
+    // 按键初始化（内部上拉，按下读 LOW）
+    pinMode(BTN_PIN, INPUT_PULLUP);
  
     // LVGL 初始化
     initDisplay();
@@ -642,6 +675,39 @@ void loop() {
     static unsigned long last_subinfo_switch = 0;
     static bool          showing_artist      = true;
     static int           last_displayed_sec  = -1;
+
+    // ---- 按键检测（软件消抖） ----
+    {
+        static bool     last_raw        = HIGH;
+        static bool     confirmed_state = HIGH;
+        static uint32_t debounce_start  = 0;
+        static uint32_t last_trigger    = 0;
+        static bool     startup_guard   = true; // 上电后屏蔽 1 秒，等电平稳定
+
+        if (startup_guard) {
+            if (millis() >= 1000) {
+                startup_guard   = false;
+                last_raw        = digitalRead(BTN_PIN);
+                confirmed_state = last_raw;
+            }
+        } else {
+            bool raw = digitalRead(BTN_PIN);
+
+            if (raw != last_raw) {
+                debounce_start = millis();
+                last_raw = raw;
+            }
+            if ((millis() - debounce_start) >= BTN_DEBOUNCE_MS && raw != confirmed_state) {
+                confirmed_state = raw;
+                if (confirmed_state == LOW) {  // 下降沿 = 按下
+                    if (millis() - last_trigger >= BTN_COOLDOWN_MS) {
+                        last_trigger = millis();
+                        sendMpdNext();
+                    }
+                }
+            }
+        }
+    }
 
     // ---- 非阻塞 MPD 状态机 ----
     // 如果状态机正在运行（非 IDLE），持续推进它
