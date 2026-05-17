@@ -40,7 +40,8 @@ static const unsigned long FLIP_INTERVAL_MS = 7000;
 // ============================================================
 static const uint8_t  BTN_PIN         = 9;
 static const uint32_t BTN_DEBOUNCE_MS = 50;   // 消抖时间
-static const uint32_t BTN_COOLDOWN_MS = 500;  // 防止连发的冷却时间
+static const uint32_t BTN_COOLDOWN_MS  = 500;  // 防止连发的冷却时间
+static const uint32_t BTN_LONGPRESS_MS = 500;  // 长按判定时间
 
 WiFiClient client;
 
@@ -521,6 +522,22 @@ static void sendMpdNext() {
     mpdState    = MPD_SEND_STATUS;
 }
 
+// 发送 MPD pause 命令，切换播放/暂停
+static void sendMpdToggle() {
+    if (!mpdConnected) return;
+    while (client.available()) client.read();
+    client.print("pause\n");
+    uint32_t t = millis();
+    while (millis() - t < 300) {
+        if (client.available()) {
+            String line = client.readStringUntil('\n');
+            if (line.startsWith("OK") || line.startsWith("ACK")) break;
+        }
+    }
+    mpd_buf_len = 0;
+    mpdState    = MPD_SEND_STATUS;
+}
+
 // 非阻塞 MPD 状态机：每次 loop() 调用一次，推进一小步
 static void mpdStateMachine() {
     if (!mpdConnected) {
@@ -683,7 +700,6 @@ void loop() {
         static uint32_t debounce_start  = 0;
         static uint32_t last_trigger    = 0;
         static bool     startup_guard   = true; // 上电后屏蔽 1 秒，等电平稳定
-
         if (startup_guard) {
             if (millis() >= 1000) {
                 startup_guard   = false;
@@ -699,10 +715,20 @@ void loop() {
             }
             if ((millis() - debounce_start) >= BTN_DEBOUNCE_MS && raw != confirmed_state) {
                 confirmed_state = raw;
-                if (confirmed_state == LOW) {  // 下降沿 = 按下
-                    if (millis() - last_trigger >= BTN_COOLDOWN_MS) {
-                        last_trigger = millis();
-                        sendMpdNext();
+                if (confirmed_state == LOW) {
+                    // 下降沿：记录按下时刻
+                    last_trigger = millis();
+                } else {
+                    // 上升沿：松开，判断是短按还是长按
+                    if (last_trigger > 0) {
+                        if (millis() - last_trigger < BTN_LONGPRESS_MS) {
+                            // 短按：切下一首
+                            sendMpdNext();
+                        } else {
+                            // 长按：暂停/恢复
+                            sendMpdToggle();
+                        }
+                        last_trigger = 0;
                     }
                 }
             }
